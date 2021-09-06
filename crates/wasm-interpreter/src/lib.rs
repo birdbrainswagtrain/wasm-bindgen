@@ -215,6 +215,14 @@ impl Interpreter {
 
     fn call(&mut self, id: FunctionId, module: &Module, args: &[i32]) -> Option<i32> {
         let func = module.funcs.get(id);
+
+        // Skip ctors since they can contain instructions the interpreter doesn't support
+        if let Some(name) = &func.name {
+            if name == "__wasm_call_ctors" {
+                return None;
+            }
+        }
+
         log::debug!("starting a call of {:?} {:?}", id, func.name);
         log::debug!("arguments {:?}", args);
         let local = match &func.kind {
