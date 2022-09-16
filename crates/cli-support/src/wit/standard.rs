@@ -146,16 +146,6 @@ pub enum Instruction {
     I32FromOptionRust {
         class: String,
     },
-    /// Pops an `s64` or `u64` from the stack, pushing two `i32` values.
-    I32Split64 {
-        signed: bool,
-    },
-    /// Pops an `s64` or `u64` from the stack, pushing three `i32` values.
-    /// First is the "some/none" bit, and the next is the low bits, and the
-    /// next is the high bits.
-    I32SplitOption64 {
-        signed: bool,
-    },
     /// Pops an `externref` from the stack, pushes either 0 if it's "none" or and
     /// index into the owned wasm table it was stored at if it's "some"
     I32FromOptionExternref {
@@ -219,16 +209,27 @@ pub enum Instruction {
         mem: walrus::MemoryId,
     },
 
+    /// Pops a nullable externref; if it is non-zero, throws it.
+    UnwrapResult {
+        /// Similar to `I32FromOptionExternref`,
+        /// Set to `Some` by the externref pass, and we then take from the externref table. If
+        /// None, we use takeObject.
+        table_and_drop: Option<(walrus::TableId, walrus::FunctionId)>,
+    },
+    UnwrapResultString {
+        table_and_drop: Option<(walrus::TableId, walrus::FunctionId)>,
+    },
+
     /// pops a `i32`, pushes `bool`
     BoolFromI32,
     /// pops `i32`, loads externref at that slot, dealloates externref, pushes `externref`
-    ExternrefLoadOwned,
+    ExternrefLoadOwned {
+        /// This is needed solely for `Result`, since it can contain externrefs,
+        /// but has to pass them through a retptr.
+        table_and_drop: Option<(walrus::TableId, walrus::FunctionId)>,
+    },
     /// pops `i32`, pushes string from that `char`
     StringFromChar,
-    /// pops two `i32`, pushes a 64-bit number
-    I64FromLoHi {
-        signed: bool,
-    },
     /// pops `i32`, pushes an externref for the wrapped rust class
     RustFromI32 {
         class: String,
@@ -242,6 +243,8 @@ pub enum Instruction {
         optional: bool,
         mem: walrus::MemoryId,
         free: walrus::FunctionId,
+        /// If we're in reference-types mode, the externref table ID to get the cached string from.
+        table: Option<walrus::TableId>,
     },
     /// pops ptr/length, pushes a vector, frees the original data
     VectorLoad {
@@ -284,9 +287,6 @@ pub enum Instruction {
     OptionCharFromI32,
     OptionEnumFromI32 {
         hole: u32,
-    },
-    Option64FromI32 {
-        signed: bool,
     },
 }
 
@@ -502,6 +502,12 @@ impl walrus::CustomSection for NonstandardWitSection {
                         if let Some((table, alloc)) = table_and_alloc {
                             roots.push_table(table);
                             roots.push_func(alloc);
+                        }
+                    }
+                    UnwrapResult { table_and_drop } | UnwrapResultString { table_and_drop } => {
+                        if let Some((table, drop)) = table_and_drop {
+                            roots.push_table(table);
+                            roots.push_func(drop);
                         }
                     }
                     _ => {}

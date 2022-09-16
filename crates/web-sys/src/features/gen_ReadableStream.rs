@@ -18,6 +18,45 @@ extern "C" {
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `ReadableStream`*"]
     pub fn locked(this: &ReadableStream) -> bool;
+    #[cfg(web_sys_unstable_apis)]
+    #[wasm_bindgen(catch, constructor, js_class = "ReadableStream")]
+    #[doc = "The `new ReadableStream(..)` constructor, creating a new instance of `ReadableStream`."]
+    #[doc = ""]
+    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream/ReadableStream)"]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ReadableStream`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    pub fn new() -> Result<ReadableStream, JsValue>;
+    #[cfg(web_sys_unstable_apis)]
+    #[wasm_bindgen(catch, constructor, js_class = "ReadableStream")]
+    #[doc = "The `new ReadableStream(..)` constructor, creating a new instance of `ReadableStream`."]
+    #[doc = ""]
+    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream/ReadableStream)"]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `ReadableStream`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    pub fn new_with_underlying_source(
+        underlying_source: &::js_sys::Object,
+    ) -> Result<ReadableStream, JsValue>;
+    #[cfg(web_sys_unstable_apis)]
+    #[cfg(feature = "QueuingStrategy")]
+    #[wasm_bindgen(catch, constructor, js_class = "ReadableStream")]
+    #[doc = "The `new ReadableStream(..)` constructor, creating a new instance of `ReadableStream`."]
+    #[doc = ""]
+    #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream/ReadableStream)"]
+    #[doc = ""]
+    #[doc = "*This API requires the following crate features to be activated: `QueuingStrategy`, `ReadableStream`*"]
+    #[doc = ""]
+    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
+    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
+    pub fn new_with_underlying_source_and_strategy(
+        underlying_source: &::js_sys::Object,
+        strategy: &QueuingStrategy,
+    ) -> Result<ReadableStream, JsValue>;
     # [wasm_bindgen (method , structural , js_class = "ReadableStream" , js_name = cancel)]
     #[doc = "The `cancel()` method."]
     #[doc = ""]
@@ -73,7 +112,6 @@ extern "C" {
         transform: &ReadableWritablePair,
         options: &StreamPipeOptions,
     ) -> ReadableStream;
-    #[cfg(web_sys_unstable_apis)]
     #[cfg(feature = "WritableStream")]
     # [wasm_bindgen (method , structural , js_class = "ReadableStream" , js_name = pipeTo)]
     #[doc = "The `pipeTo()` method."]
@@ -81,11 +119,7 @@ extern "C" {
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream/pipeTo)"]
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `ReadableStream`, `WritableStream`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
     pub fn pipe_to(this: &ReadableStream, destination: &WritableStream) -> ::js_sys::Promise;
-    #[cfg(web_sys_unstable_apis)]
     #[cfg(all(feature = "StreamPipeOptions", feature = "WritableStream",))]
     # [wasm_bindgen (method , structural , js_class = "ReadableStream" , js_name = pipeTo)]
     #[doc = "The `pipeTo()` method."]
@@ -93,9 +127,6 @@ extern "C" {
     #[doc = "[MDN Documentation](https://developer.mozilla.org/en-US/docs/Web/API/ReadableStream/pipeTo)"]
     #[doc = ""]
     #[doc = "*This API requires the following crate features to be activated: `ReadableStream`, `StreamPipeOptions`, `WritableStream`*"]
-    #[doc = ""]
-    #[doc = "*This API is unstable and requires `--cfg=web_sys_unstable_apis` to be activated, as"]
-    #[doc = "[described in the `wasm-bindgen` guide](https://rustwasm.github.io/docs/wasm-bindgen/web-sys/unstable-apis.html)*"]
     pub fn pipe_to_with_options(
         this: &ReadableStream,
         destination: &WritableStream,

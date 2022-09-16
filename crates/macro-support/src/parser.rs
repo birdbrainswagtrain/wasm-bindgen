@@ -1,4 +1,4 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::char;
 use std::str::Chars;
 
@@ -8,17 +8,40 @@ use backend::util::{ident_ty, ShortHash};
 use backend::Diagnostic;
 use proc_macro2::{Delimiter, Ident, Span, TokenStream, TokenTree};
 use quote::ToTokens;
-use shared;
-use syn;
 use syn::parse::{Parse, ParseStream, Result as SynResult};
 use syn::spanned::Spanned;
+use syn::Lit;
 
 thread_local!(static ATTRS: AttributeParseState = Default::default());
 
+/// Javascript keywords which are not keywords in Rust.
+const JS_KEYWORDS: [&str; 20] = [
+    "class",
+    "case",
+    "catch",
+    "debugger",
+    "default",
+    "delete",
+    "export",
+    "extends",
+    "finally",
+    "function",
+    "import",
+    "instanceof",
+    "new",
+    "null",
+    "switch",
+    "this",
+    "throw",
+    "var",
+    "void",
+    "with",
+];
 #[derive(Default)]
 struct AttributeParseState {
     parsed: Cell<usize>,
     checks: Cell<usize>,
+    unused_attrs: RefCell<Vec<Ident>>,
 }
 
 /// Parsed attributes from a `#[wasm_bindgen(..)]`.
@@ -72,35 +95,24 @@ macro_rules! methods {
     ($(($name:ident, $variant:ident($($contents:tt)*)),)*) => {
         $(methods!(@method $name, $variant($($contents)*));)*
 
-        #[cfg(feature = "strict-macro")]
-        fn check_used(self) -> Result<(), Diagnostic> {
+        fn check_used(self) {
             // Account for the fact this method was called
-            ATTRS.with(|state| state.checks.set(state.checks.get() + 1));
+            ATTRS.with(|state| {
+                state.checks.set(state.checks.get() + 1);
 
-            let mut errors = Vec::new();
-            for (used, attr) in self.attrs.iter() {
-                if used.get() {
-                    continue
-                }
-                // The check below causes rustc to crash on powerpc64 platforms
-                // with an LLVM error. To avoid this, we instead use #[cfg()]
-                // and duplicate the function below. See #58516 for details.
-                /*if !cfg!(feature = "strict-macro") {
-                    continue
-                }*/
-                let span = match attr {
-                    $(BindgenAttr::$variant(span, ..) => span,)*
-                };
-                errors.push(Diagnostic::span_error(*span, "unused #[wasm_bindgen] attribute"));
-            }
-            Diagnostic::from_vec(errors)
-        }
-
-        #[cfg(not(feature = "strict-macro"))]
-        fn check_used(self) -> Result<(), Diagnostic> {
-            // Account for the fact this method was called
-            ATTRS.with(|state| state.checks.set(state.checks.get() + 1));
-            Ok(())
+                state.unused_attrs.borrow_mut().extend(
+                    self.attrs
+                    .iter()
+                    .filter_map(|(used, attr)| if used.get() { None } else { Some(attr) })
+                    .map(|attr| {
+                        match attr {
+                            $(BindgenAttr::$variant(span, ..) => {
+                                syn::parse_quote_spanned!(*span => $name)
+                            })*
+                        }
+                    })
+                );
+            });
         }
     };
 
@@ -196,7 +208,7 @@ impl BindgenAttrs {
             }
             let mut attrs: BindgenAttrs = syn::parse2(group.stream())?;
             ret.attrs.extend(attrs.attrs.drain(..));
-            attrs.check_used()?;
+            attrs.check_used();
         }
     }
 
@@ -331,7 +343,11 @@ impl Parse for BindgenAttr {
 
         attrgen!(parsers);
 
-        return Err(original.error("unknown attribute"));
+        return Err(original.error(if attr_string.starts_with("_") {
+            "unknown attribute: it's safe to remove unused attributes entirely."
+        } else {
+            "unknown attribute"
+        }));
     }
 }
 
@@ -388,9 +404,8 @@ impl<'a> ConvertToAst<BindgenAttrs> for &'a mut syn::ItemStruct {
             };
 
             let attrs = BindgenAttrs::find(&mut field.attrs)?;
-            assert_not_variadic(&attrs)?;
             if attrs.skip().is_some() {
-                attrs.check_used()?;
+                attrs.check_used();
                 continue;
             }
 
@@ -415,11 +430,11 @@ impl<'a> ConvertToAst<BindgenAttrs> for &'a mut syn::ItemStruct {
                 generate_typescript: attrs.skip_typescript().is_none(),
                 getter_with_clone: getter_with_clone || attrs.getter_with_clone().is_some(),
             });
-            attrs.check_used()?;
+            attrs.check_used();
         }
         let generate_typescript = attrs.skip_typescript().is_none();
         let comments: Vec<String> = extract_doc_comments(&self.attrs);
-        attrs.check_used()?;
+        attrs.check_used();
         Ok(ast::Struct {
             rust_name: self.ident.clone(),
             js_name,
@@ -447,14 +462,14 @@ fn get_expr(mut expr: &syn::Expr) -> &syn::Expr {
     expr
 }
 
-impl<'a> ConvertToAst<(BindgenAttrs, &'a ast::ImportModule)> for syn::ForeignItemFn {
+impl<'a> ConvertToAst<(BindgenAttrs, &'a Option<ast::ImportModule>)> for syn::ForeignItemFn {
     type Target = ast::ImportKind;
 
     fn convert(
         self,
-        (opts, module): (BindgenAttrs, &'a ast::ImportModule),
+        (opts, module): (BindgenAttrs, &'a Option<ast::ImportModule>),
     ) -> Result<Self::Target, Diagnostic> {
-        let wasm = function_from_decl(
+        let mut wasm = function_from_decl(
             &self.sig.ident,
             &opts,
             self.sig.clone(),
@@ -462,6 +477,7 @@ impl<'a> ConvertToAst<(BindgenAttrs, &'a ast::ImportModule)> for syn::ForeignIte
             self.vis.clone(),
             false,
             None,
+            false,
         )?
         .0;
         let catch = opts.catch().is_some();
@@ -581,6 +597,53 @@ impl<'a> ConvertToAst<(BindgenAttrs, &'a ast::ImportModule)> for syn::ForeignIte
             }
         }
         let assert_no_shim = opts.assert_no_shim().is_some();
+
+        let mut doc_comment = String::new();
+        // Extract the doc comments from our list of attributes.
+        wasm.rust_attrs.retain(|attr| {
+            struct DocContents {
+                contents: String,
+            }
+
+            impl Parse for DocContents {
+                fn parse(input: ParseStream) -> SynResult<Self> {
+                    <Token![=]>::parse(input)?;
+                    match Lit::parse(input)? {
+                        Lit::Str(str) => Ok(Self {
+                            contents: str.value(),
+                        }),
+                        other => Err(syn::Error::new_spanned(other, "expected a string literal")),
+                    }
+                }
+            }
+
+            /// Returns the contents of the passed `#[doc = "..."]` attribute,
+            /// or `None` if it isn't one.
+            fn get_docs(attr: &syn::Attribute) -> Option<String> {
+                if attr.path.is_ident("doc") {
+                    syn::parse2::<DocContents>(attr.tokens.clone())
+                        .ok()
+                        .map(|doc| doc.contents)
+                } else {
+                    None
+                }
+            }
+
+            if let Some(docs) = get_docs(attr) {
+                if !doc_comment.is_empty() {
+                    // Add newlines between the doc comments
+                    doc_comment.push('\n');
+                }
+                // Add this doc comment to the complete docs
+                doc_comment.push_str(&docs);
+
+                // Remove it from the list of regular attributes
+                false
+            } else {
+                true
+            }
+        });
+
         let ret = ast::ImportKind::Function(ast::ImportFunction {
             function: wasm,
             assert_no_shim,
@@ -591,9 +654,9 @@ impl<'a> ConvertToAst<(BindgenAttrs, &'a ast::ImportModule)> for syn::ForeignIte
             structural: opts.structural().is_some() || opts.r#final().is_none(),
             rust_name: self.sig.ident.clone(),
             shim: Ident::new(&shim, Span::call_site()),
-            doc_comment: None,
+            doc_comment,
         });
-        opts.check_used()?;
+        opts.check_used();
 
         Ok(ret)
     }
@@ -603,7 +666,6 @@ impl ConvertToAst<BindgenAttrs> for syn::ForeignItemType {
     type Target = ast::ImportKind;
 
     fn convert(self, attrs: BindgenAttrs) -> Result<Self::Target, Diagnostic> {
-        assert_not_variadic(&attrs)?;
         let js_name = attrs
             .js_name()
             .map(|s| s.0)
@@ -627,7 +689,7 @@ impl ConvertToAst<BindgenAttrs> for syn::ForeignItemType {
                 _ => {}
             }
         }
-        attrs.check_used()?;
+        attrs.check_used();
         Ok(ast::ImportKind::Type(ast::ImportType {
             vis: self.vis,
             attrs: self.attrs,
@@ -644,17 +706,17 @@ impl ConvertToAst<BindgenAttrs> for syn::ForeignItemType {
     }
 }
 
-impl<'a> ConvertToAst<(BindgenAttrs, &'a ast::ImportModule)> for syn::ForeignItemStatic {
+impl<'a> ConvertToAst<(BindgenAttrs, &'a Option<ast::ImportModule>)> for syn::ForeignItemStatic {
     type Target = ast::ImportKind;
 
     fn convert(
         self,
-        (opts, module): (BindgenAttrs, &'a ast::ImportModule),
+        (opts, module): (BindgenAttrs, &'a Option<ast::ImportModule>),
     ) -> Result<Self::Target, Diagnostic> {
         if self.mutability.is_some() {
             bail_span!(self.mutability, "cannot import mutable globals yet")
         }
-        assert_not_variadic(&opts)?;
+
         let default_name = self.ident.to_string();
         let js_name = opts
             .js_name()
@@ -666,7 +728,7 @@ impl<'a> ConvertToAst<(BindgenAttrs, &'a ast::ImportModule)> for syn::ForeignIte
             self.ident,
             ShortHash((&js_name, module, &self.ident)),
         );
-        opts.check_used()?;
+        opts.check_used();
         Ok(ast::ImportKind::Static(ast::ImportStatic {
             ty: *self.ty,
             vis: self.vis,
@@ -691,10 +753,6 @@ impl ConvertToAst<BindgenAttrs> for syn::ItemFn {
                 "can only #[wasm_bindgen] non-const functions"
             );
         }
-        if self.sig.unsafety.is_some() {
-            bail_span!(self.sig.unsafety, "can only #[wasm_bindgen] safe functions");
-        }
-        assert_not_variadic(&attrs)?;
 
         let ret = function_from_decl(
             &self.sig.ident,
@@ -704,13 +762,19 @@ impl ConvertToAst<BindgenAttrs> for syn::ItemFn {
             self.vis,
             false,
             None,
+            false,
         )?;
-        attrs.check_used()?;
+        attrs.check_used();
         Ok(ret.0)
     }
 }
 
+pub(crate) fn is_js_keyword(keyword: &str) -> bool {
+    JS_KEYWORDS.contains(&keyword)
+}
+
 /// Construct a function (and gets the self type if appropriate) for our AST from a syn function.
+#[allow(clippy::too_many_arguments)]
 fn function_from_decl(
     decl_name: &syn::Ident,
     opts: &BindgenAttrs,
@@ -719,6 +783,7 @@ fn function_from_decl(
     vis: syn::Visibility,
     allow_self: bool,
     self_ty: Option<&Ident>,
+    is_from_impl: bool,
 ) -> Result<(ast::Function, Option<ast::MethodSelf>), Diagnostic> {
     if sig.variadic.is_some() {
         bail_span!(sig.variadic, "can't #[wasm_bindgen] variadic functions");
@@ -754,11 +819,21 @@ fn function_from_decl(
         })
     };
 
+    let replace_colliding_arg = |i: &mut syn::PatType| {
+        if let syn::Pat::Ident(ref mut i) = *i.pat {
+            let ident = i.ident.to_string();
+            if is_js_keyword(ident.as_str()) {
+                i.ident = Ident::new(format!("_{}", ident).as_str(), i.ident.span());
+            }
+        }
+    };
+
     let mut method_self = None;
     let arguments = inputs
         .into_iter()
         .filter_map(|arg| match arg {
             syn::FnArg::Typed(mut c) => {
+                replace_colliding_arg(&mut c);
                 c.ty = Box::new(replace_self(*c.ty));
                 Some(c)
             }
@@ -784,21 +859,29 @@ fn function_from_decl(
         syn::ReturnType::Type(_, ty) => Some(replace_self(*ty)),
     };
 
-    let (name, name_span, renamed_via_js_name) =
-        if let Some((js_name, js_name_span)) = opts.js_name() {
-            let kind = operation_kind(&opts);
-            let prefix = match kind {
-                OperationKind::Setter(_) => "set_",
-                _ => "",
-            };
-            (
-                format!("{}{}", prefix, js_name.to_string()),
-                js_name_span,
-                true,
-            )
-        } else {
-            (decl_name.to_string(), decl_name.span(), false)
+    let (name, name_span, renamed_via_js_name) = if let Some((js_name, js_name_span)) =
+        opts.js_name()
+    {
+        let kind = operation_kind(opts);
+        let prefix = match kind {
+            OperationKind::Setter(_) => "set_",
+            _ => "",
         };
+        let name = if prefix.is_empty() && opts.method().is_none() && is_js_keyword(js_name) {
+            format!("_{}", js_name)
+        } else {
+            format!("{}{}", prefix, js_name)
+        };
+        (name, js_name_span, true)
+    } else {
+        let name =
+            if !is_from_impl && opts.method().is_none() && is_js_keyword(&decl_name.to_string()) {
+                format!("_{}", decl_name)
+            } else {
+                decl_name.to_string()
+            };
+        (name, decl_name.span(), false)
+    };
     Ok((
         ast::Function {
             arguments,
@@ -810,6 +893,7 @@ fn function_from_decl(
             rust_vis: vis,
             r#async: sig.asyncness.is_some(),
             generate_typescript: opts.skip_typescript().is_none(),
+            variadic: opts.variadic().is_some(),
         },
         method_self,
     ))
@@ -959,7 +1043,7 @@ impl<'a> MacroParse<BindgenAttrs> for &'a mut syn::ItemImpl {
             }
         }
         Diagnostic::from_vec(errors)?;
-        opts.check_used()?;
+        opts.check_used();
         Ok(())
     }
 }
@@ -1040,9 +1124,6 @@ impl<'a, 'b> MacroParse<(&'a Ident, &'a str)> for &'b mut syn::ImplItemMethod {
                 "can only #[wasm_bindgen] non-const functions",
             );
         }
-        if self.sig.unsafety.is_some() {
-            bail_span!(self.sig.unsafety, "can only bindgen safe functions",);
-        }
 
         let opts = BindgenAttrs::find(&mut self.attrs)?;
         let comments = extract_doc_comments(&self.attrs);
@@ -1054,6 +1135,7 @@ impl<'a, 'b> MacroParse<(&'a Ident, &'a str)> for &'b mut syn::ImplItemMethod {
             self.vis.clone(),
             true,
             Some(class),
+            true,
         )?;
         let method_kind = if opts.constructor().is_some() {
             ast::MethodKind::Constructor
@@ -1072,7 +1154,7 @@ impl<'a, 'b> MacroParse<(&'a Ident, &'a str)> for &'b mut syn::ImplItemMethod {
             rust_name: self.sig.ident.clone(),
             start: false,
         });
-        opts.check_used()?;
+        opts.check_used();
         Ok(())
     }
 }
@@ -1109,7 +1191,7 @@ fn import_enum(enum_: syn::ItemEnum, program: &mut ast::Program) -> Result<(), D
     }
 
     program.imports.push(ast::Import {
-        module: ast::ImportModule::None,
+        module: None,
         js_namespace: None,
         kind: ast::ImportKind::Enum(ast::ImportEnum {
             vis: enum_.vis,
@@ -1141,7 +1223,7 @@ impl<'a> MacroParse<(&'a mut TokenStream, BindgenAttrs)> for syn::ItemEnum {
                     attrs: _,
                     lit: syn::Lit::Str(_),
                 }) => {
-                    opts.check_used()?;
+                    opts.check_used();
                     return import_enum(self, program);
                 }
                 _ => {}
@@ -1151,7 +1233,7 @@ impl<'a> MacroParse<(&'a mut TokenStream, BindgenAttrs)> for syn::ItemEnum {
             .js_name()
             .map(|s| s.0)
             .map_or_else(|| self.ident.to_string(), |s| s.to_string());
-        opts.check_used()?;
+        opts.check_used();
 
         let has_discriminant = self.variants[0].discriminant.is_some();
 
@@ -1265,7 +1347,7 @@ impl MacroParse<BindgenAttrs> for syn::ItemConst {
             }
         }
 
-        opts.check_used()?;
+        opts.check_used();
 
         Ok(())
     }
@@ -1293,19 +1375,19 @@ impl MacroParse<BindgenAttrs> for syn::ItemForeignMod {
                 let msg = "cannot specify both `module` and `raw_module`";
                 errors.push(Diagnostic::span_error(span, msg));
             }
-            ast::ImportModule::Named(name.to_string(), span)
+            Some(ast::ImportModule::Named(name.to_string(), span))
         } else if let Some((name, span)) = opts.raw_module() {
             if opts.inline_js().is_some() {
                 let msg = "cannot specify both `raw_module` and `inline_js`";
                 errors.push(Diagnostic::span_error(span, msg));
             }
-            ast::ImportModule::RawNamed(name.to_string(), span)
+            Some(ast::ImportModule::RawNamed(name.to_string(), span))
         } else if let Some((js, span)) = opts.inline_js() {
             let i = program.inline_js.len();
             program.inline_js.push(js.to_string());
-            ast::ImportModule::Inline(i, span)
+            Some(ast::ImportModule::Inline(i, span))
         } else {
-            ast::ImportModule::None
+            None
         };
         for item in self.items.into_iter() {
             if let Err(e) = item.macro_parse(program, module.clone()) {
@@ -1313,16 +1395,16 @@ impl MacroParse<BindgenAttrs> for syn::ItemForeignMod {
             }
         }
         Diagnostic::from_vec(errors)?;
-        opts.check_used()?;
+        opts.check_used();
         Ok(())
     }
 }
 
-impl MacroParse<ast::ImportModule> for syn::ForeignItem {
+impl MacroParse<Option<ast::ImportModule>> for syn::ForeignItem {
     fn macro_parse(
         mut self,
         program: &mut ast::Program,
-        module: ast::ImportModule,
+        module: Option<ast::ImportModule>,
     ) -> Result<(), Diagnostic> {
         let item_opts = {
             let attrs = match self {
@@ -1508,16 +1590,6 @@ fn assert_no_lifetimes(sig: &syn::Signature) -> Result<(), Diagnostic> {
     Diagnostic::from_vec(walk.diagnostics)
 }
 
-/// This method always fails if the BindgenAttrs contain variadic
-fn assert_not_variadic(attrs: &BindgenAttrs) -> Result<(), Diagnostic> {
-    if let Some(span) = attrs.variadic() {
-        let msg = "the `variadic` attribute can only be applied to imported \
-                   (`extern`) functions";
-        return Err(Diagnostic::span_error(*span, msg));
-    }
-    Ok(())
-}
-
 /// Extracts the last ident from the path
 fn extract_path_ident(path: &syn::Path) -> Result<Ident, Diagnostic> {
     for segment in path.segments.iter() {
@@ -1539,12 +1611,22 @@ pub fn reset_attrs_used() {
     ATTRS.with(|state| {
         state.parsed.set(0);
         state.checks.set(0);
+        state.unused_attrs.borrow_mut().clear();
     })
 }
 
-pub fn assert_all_attrs_checked() {
+pub fn check_unused_attrs(tokens: &mut TokenStream) {
     ATTRS.with(|state| {
         assert_eq!(state.parsed.get(), state.checks.get());
+        let unused_attrs = &*state.unused_attrs.borrow();
+        if !unused_attrs.is_empty() {
+            tokens.extend(quote::quote! {
+                // Anonymous scope to prevent name clashes.
+                const _: () = {
+                    #(let #unused_attrs: ();)*
+                };
+            });
+        }
     })
 }
 

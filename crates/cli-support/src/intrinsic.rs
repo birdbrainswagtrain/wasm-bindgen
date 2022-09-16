@@ -80,6 +80,10 @@ fn opt_f64() -> Descriptor {
     Descriptor::Option(Box::new(Descriptor::F64))
 }
 
+fn opt_i64() -> Descriptor {
+    Descriptor::Option(Box::new(Descriptor::I64))
+}
+
 intrinsics! {
     pub enum Intrinsic {
         #[symbol = "__wbindgen_jsval_eq"]
@@ -193,9 +197,24 @@ intrinsics! {
         #[symbol = "__wbindgen_number_new"]
         #[signature = fn(F64) -> Externref]
         NumberNew,
-        #[symbol = "__wbindgen_bigint_new"]
+        #[symbol = "__wbindgen_bigint_from_str"]
         #[signature = fn(ref_string()) -> Externref]
-        BigIntNew,
+        BigIntFromStr,
+        #[symbol = "__wbindgen_bigint_from_i64"]
+        #[signature = fn(I64) -> Externref]
+        BigIntFromI64,
+        #[symbol = "__wbindgen_bigint_from_u64"]
+        #[signature = fn(U64) -> Externref]
+        BigIntFromU64,
+        #[symbol = "__wbindgen_bigint_from_i128"]
+        #[signature = fn(I64, U64) -> Externref]
+        BigIntFromI128,
+        #[symbol = "__wbindgen_bigint_from_u128"]
+        #[signature = fn(U64, U64) -> Externref]
+        BigIntFromU128,
+        #[symbol = "__wbindgen_bigint_get_as_i64"]
+        #[signature = fn(ref_externref()) -> opt_i64()]
+        BigIntGetAsI64,
         #[symbol = "__wbindgen_string_new"]
         #[signature = fn(ref_string()) -> Externref]
         StringNew,
@@ -220,6 +239,9 @@ intrinsics! {
         #[symbol = "__wbindgen_rethrow"]
         #[signature = fn(Externref) -> Unit]
         Rethrow,
+        #[symbol = "__wbindgen_error_new"]
+        #[signature = fn(ref_string()) -> Externref]
+        ErrorNew,
         #[symbol = "__wbindgen_memory"]
         #[signature = fn() -> Externref]
         Memory,
